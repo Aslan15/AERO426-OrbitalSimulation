@@ -17,32 +17,152 @@ function [] = driver()
     moon.w = 0.0;               % Argument of perigee [°]
     moon.phi = 0.0;             % True anomaly [°]
     
-    % Satellite    
-    sat.r_0(1:3) = [-247.122; 0.0; 4493.209];
-    sat.r_0(4:6) = [0.0; 1.44467; 0.0];
+    % Satellites    
+    visir.r_0(1:3) = [247.122; 0.0; -4493.209];
+    visir.r_0(4:6) = [0.0; 1.44467; 0.0];
+    visir.nadir = 180;
+    visir = cart2kep(moon, visir);
+    
+    n = 10; 
+    sats{1} = struct(); 
+    sats{1}.a = moon.R*2;
+    sats{1}.e = 0.0;
+    sats{1}.i = 90;
+    sats{1}.Om = 0.0;
+    sats{1}.w = 0.0;
+    sats{1}.phi = 0.0;
+    
+    for i = 1:n
+        if(i ~= 1)
+            sats{i} = struct();
+        end
+        sats{i} = sats{1};
+        sats{i}.phi = 360/n * i;
+        sats{i} = kep2cart(moon, sats{i});
+    end
     
     % INITIAL CONDITIONS - Earth-fixed frame to be considered inertial
     moon.r_0 = kep2cart(earth, moon);
     moon.t_0 = [0 120*24*3600];
-%     sat.r_0 = rel2in(sat, moon);
-    
-    r_0 = [moon.r_0(1:3); sat.r_0(1:3); moon.r_0(4:6); sat.r_0(4:6)];
+
     
     % ORBIT PROPAGATION
+    % - VISIR
     opts = odeset('RelTol',1e-10,'AbsTol',1e-12);
-%     [t, r] = ode45(@(t,r) dr_m(t,r, earth, moon), moon.t_0, r_0, opts);
-    [t, r] = ode45(@(t,r) dr_s(t,r, earth, moon), moon.t_0, sat.r_0, opts);
+    [visir.t, visir.r] = ode45(@(t,r) dr_s(t,r, earth, moon), moon.t_0, visir.r_0, opts);
+    % - Relay Satellites
+    r_s = orbitObject.r(i,1:3)';
+    th1 = acosd(R/norm(r_s));
+    th2 = acosd(R/norm(r_R));
+    for i = 1:n
+        [sats{i}.t, sats{i}.r] = ode45(@(t,r) dr_s(t,r, earth, moon), moon.t_0, sats{i}.r_0, opts);
+    end
     
+    % REVISIT TIMES
+    visir = revisitTimes(moon, visir);
+    for i = 1:n
+       sats{i} = revisitTimes(moon,sats{i}); 
+    end
+    
+    t_i = 0;
+    inView = 0;
+    while(t_i <= moon.t_0(2))
+        for i = 0:n
+           if(i == 0)
+              for j = 1:length(visir.revisit)-1
+                  if(t_i >= visir.revisit(j,2))&&(t_i < visir.revisit(j+1,2))
+                      t_i = visir.revisit(j+1,2);
+                      inView = inView + 1;
+                      break;
+                  end
+              end
+           else
+              for j = 1:length(sats{i}.revisit)-1
+                  if(t_i >= sats{i}.revisit(j,2))&&(t_i < sats{i}.revisit(j+1,2))
+                      t_i = sats{i}.revisit(j+1,2);
+                      inView = inView + 1;
+                      break;
+                  end
+              end
+           end
+        end
+        if(inView == 0)
+           break;
+        else
+            inView = 0;
+        end
+    end
+    
+    if(inView)
+        fprintf("The relays have constant communication with the ground station\n");
+    else
+        if((moon.t_0(2)-t_i)/3600 < 100)
+            fprintf(moon.t_0(2)-t_i)/3600);
+            fprintf("The relays DO NOT have constant communication with the ground station\n");
+        end
+    end
+
     % ORBIT PLOT
     figure
-    plot3(r(:,1), r(:,2), r(:,3));
+    plot3(visir.r(:,1), visir.r(:,2), visir.r(:,3));
+    daspect([1 1 1]);
     grid on
     hold on
-    plot3(r(:,4), r(:,5), r(:,6));
+    [x,y,z] = sphere;
+    surf(moon.R*x,moon.R*y,moon.R*z);
+    xlabel("x-axis [km]");
+    ylabel("y-axis [km]");
+    zlabel("z-axis [km]");
+    
+    for i = 1:1
+%         figure
+        plot3(sats{i}.r(:,1), sats{i}.r(:,2), sats{i}.r(:,3));
+        daspect([1 1 1]);
+        grid on
+        hold on
+        [x,y,z] = sphere;
+        surf(moon.R*x,moon.R*y,moon.R*z);
+        xlabel("x-axis [km]");
+        ylabel("y-axis [km]");
+        zlabel("z-axis [km]");
+    end
 end
 
-function [ R ] = kep2cart(mainBody, orbitObject)
-    % Unpack object
+function [ orbitObject ] = revisitTimes(mainBody, orbitObject)
+    R = mainBody.R;
+    r_R = R*[0 0 1]';
+    orbitObject.revisit = zeros(1,2);
+    
+    for i = 1:length(orbitObject.t)
+        r_s = orbitObject.r(i,1:3)';
+        
+        theta = acosd( dot(r_s, r_R)/( norm(r_R) * norm(r_s) ) );
+        th1 = acosd(R/norm(r_s));
+        th2 = acosd(R/norm(r_R));
+        [n m] = size(orbitObject.revisit);
+        
+        if( theta >= (th1 + th2) )
+            % object IS in line of signt of the satellite
+            if(i == 1)
+                orbitObject.revisit(n,1:2) = [1 orbitObject.t(i)];
+            elseif(orbitObject.revisit(n,1) == 0)
+                orbitObject.revisit(n+1,1:2) = [1 orbitObject.t(i)];
+            end
+        else 
+            % object is NOT in line of sight
+            if(i == 1)
+                orbitObject.revisit(n,1:2) = [0 orbitObject.t(i)];
+            elseif(orbitObject.revisit(n,1) == 1)
+                orbitObject.revisit(n+1,1:2) = [0 orbitObject.t(i)];
+            end
+        end
+    end
+end
+
+function [ orbitObject ] = kep2cart(mainBody, orbitObject)
+    % Converts keplerian inputs to cartesian
+
+    %- Unpack object
     mu = mainBody.mu;
     a = orbitObject.a;
     e = orbitObject.e;
@@ -51,6 +171,7 @@ function [ R ] = kep2cart(mainBody, orbitObject)
     w = orbitObject.w;
     phi = orbitObject.phi; 
     
+    % - Calculate parameters
     p = a*(1 - e^2);
     r = p/(1 + e*cosd(phi));
     phi_d = (1 + e*cosd(phi))^2*sqrt(mu/p^3);
@@ -67,6 +188,7 @@ function [ R ] = kep2cart(mainBody, orbitObject)
     r_vec = C_ck(w, i, Om)*[r1; r2; r3];
     v_vec = C_ck(w, i, Om)*[v1; v2; v3];
     
+    % - Pack results
     x = r_vec(1);
     y = r_vec(2);
     z = r_vec(3);
@@ -74,7 +196,51 @@ function [ R ] = kep2cart(mainBody, orbitObject)
     v = v_vec(2);
     w = v_vec(3);
     
-    R = [x, y, z, u, v, w]';
+    orbitObject.r_0 = [x, y, z, u, v, w];
+end
+
+function [ orbitObject ] = cart2kep(mainBody, orbitObject)
+    % Convert cartesian inputs to keplerian
+
+    % - Unpack object
+    mu = mainBody.mu;
+    r = orbitObject.r_0(1:3);
+    v = orbitObject.r_0(4:6);
+    x = r(1);
+    y = r(2);
+    z = r(3);
+    vx = v(1);
+    vy = v(2);
+    vz = v(3);
+    
+    
+    % - Calculate and pack parameters
+    h = cross(r,v);
+    h_dir = h/norm(h);
+    e_vec = (1/mu)*(cross(v, h) - mu * r / norm(r));
+    a = mu / ( (2*mu/norm(r)) - norm(v)^2 );
+    e = norm(e_vec);
+    i = acosd(h_dir(3));
+    Om = asind( h_dir(1)/sind(i) );
+    phi = acosd( dot(e_vec, r) / (norm(e_vec)*norm(r)) );
+    
+    R1 = [1 0       0;
+          0 cosd(i) -sind(i);
+          0 sind(i) cosd(i)];
+    R3 = [cosd(Om)  -sind(Om) 0;
+          sind(Om)  cosd(Om)  0;
+          0         0         1];
+    e_p = R1*R3*e_vec';
+    
+    w = atan2d(-e_p(2),e_p(1));
+    
+    
+    orbitObject.a = a;
+    orbitObject.e = e;
+    orbitObject.i = i;
+    orbitObject.Om = Om;
+    orbitObject.w = w;
+    orbitObject.phi = phi;
 end
 
 function [ R ] = rel2in(sat, moon)
@@ -82,9 +248,9 @@ function [ R ] = rel2in(sat, moon)
 
     % Rotation Matrix
     L = cross( moon.r_0(1:3), moon.r_0(4:6) );
-    e_mx = -moon.r_0(1:3)/norm(moon.r_0(1:3));
-    e_mz = L/norm(L);
-    e_my = cross(e_mz, e_mx);
+    e_mz = L/norm(L);   
+    e_my = -moon.r_0(1:3)/norm(moon.r_0(1:3));
+    e_mx = cross(e_my, e_mz);
     
     R(1:3) = R(1)*e_mx + R(2)*e_my + R(3)*e_mz + moon.r_0(1:3);
     R(4:6) = R(4)*e_mx + R(5)*e_my + R(6)*e_mz + moon.r_0(4:6); 
@@ -160,8 +326,11 @@ function [ dr ] = dr_s(t,r, earth, moon)
     dr(1) = r(4);
     dr(2) = r(5);
     dr(3) = r(6);
-    dr(4:6) = - mu_e/R_s^3 * r_s;
+    dr(4:6) = - mu_m/R_s^3 * r_s;
     
     dr = dr';
 end
 
+function [ T ] = calcT(r_0)
+    T = 0;
+end
